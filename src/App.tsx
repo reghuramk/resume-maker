@@ -1,35 +1,45 @@
 import { useState } from 'react'
 import type { DragEvent, ChangeEvent } from 'react'
-import { extractPdfText } from './lib/extract-pdf'
-import { rewriteResume } from './lib/rewrite-resume'
+import { readDocx, type DocxDoc } from './lib/extract-docx'
+import { rewriteResume, type RewriteResult } from './lib/rewrite-resume'
+import { buildModifiedDocx } from './lib/modify-docx'
+import { exportDocxAsPdf } from './lib/export-pdf'
 import './App.css'
+
+const DOCX_MIME =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
 function App() {
   const [file, setFile] = useState<File | null>(null)
-  const [resumeText, setResumeText] = useState('')
+  const [doc, setDoc] = useState<DocxDoc | null>(null)
   const [jobDescription, setJobDescription] = useState('')
-  const [rewritten, setRewritten] = useState('')
+  const [result, setResult] = useState<RewriteResult | null>(null)
   const [isDragging, setIsDragging] = useState(false)
-  const [isExtracting, setIsExtracting] = useState(false)
+  const [isReading, setIsReading] = useState(false)
   const [isRewriting, setIsRewriting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const handleFile = async (incoming: File | undefined) => {
     if (!incoming) return
-    if (incoming.type !== 'application/pdf') {
-      setError('Only PDF files are supported.')
+    if (
+      incoming.type !== DOCX_MIME &&
+      !incoming.name.toLowerCase().endsWith('.docx')
+    ) {
+      setError('Only .docx files are supported.')
       return
     }
     setError(null)
     setFile(incoming)
-    setIsExtracting(true)
+    setResult(null)
+    setIsReading(true)
     try {
-      const text = await extractPdfText(incoming)
-      setResumeText(text)
+      const parsed = await readDocx(incoming)
+      setDoc(parsed)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to read PDF.')
+      setError(err instanceof Error ? err.message : 'Failed to read DOCX.')
+      setDoc(null)
     } finally {
-      setIsExtracting(false)
+      setIsReading(false)
     }
   }
 
@@ -38,28 +48,28 @@ function App() {
     setIsDragging(false)
     void handleFile(e.dataTransfer.files?.[0])
   }
-
   const onDragOver = (e: DragEvent<HTMLLabelElement>) => {
     e.preventDefault()
     setIsDragging(true)
   }
-
   const onDragLeave = (e: DragEvent<HTMLLabelElement>) => {
     e.preventDefault()
     setIsDragging(false)
   }
-
   const onChange = (e: ChangeEvent<HTMLInputElement>) => {
     void handleFile(e.target.files?.[0])
   }
 
   const onRewrite = async () => {
-    if (!resumeText.trim() || !jobDescription.trim()) return
+    if (!doc || !jobDescription.trim()) return
     setError(null)
     setIsRewriting(true)
     try {
-      const result = await rewriteResume({ resumeText, jobDescription })
-      setRewritten(result)
+      const res = await rewriteResume({
+        paragraphs: doc.paragraphs,
+        jobDescription,
+      })
+      setResult(res)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Rewrite failed.')
     } finally {
@@ -67,24 +77,53 @@ function App() {
     }
   }
 
+  const triggerBlobDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const onDownloadDocx = () => {
+    if (!doc || !result) return
+    const blob = buildModifiedDocx(doc, result.replacements)
+    const base = file?.name.replace(/\.docx$/i, '') ?? 'resume'
+    triggerBlobDownload(blob, `${base}-tailored.docx`)
+  }
+
+  const onDownloadPdf = async () => {
+    if (!doc || !result) return
+    const blob = buildModifiedDocx(doc, result.replacements)
+    try {
+      await exportDocxAsPdf(blob)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'PDF export failed.')
+    }
+  }
+
+  const replacementCount = result ? Object.keys(result.replacements).length : 0
+
   return (
     <main className="page">
       <h1>Resume Maker</h1>
       <p className="subtitle">
-        Drop your resume, paste the job description, and tailor it.
+        Drop a .docx, paste a job description, get a tailored version with
+        original formatting preserved.
       </p>
 
       <label
-        htmlFor="pdf-input"
+        htmlFor="docx-input"
         className={`dropzone ${isDragging ? 'dropzone--active' : ''}`}
         onDrop={onDrop}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
       >
         <input
-          id="pdf-input"
+          id="docx-input"
           type="file"
-          accept="application/pdf"
+          accept=".docx"
           onChange={onChange}
           hidden
         />
@@ -92,12 +131,13 @@ function App() {
           <div className="file-info">
             <strong>{file.name}</strong>
             <span>{(file.size / 1024).toFixed(1)} KB</span>
-            {isExtracting && <span>Extracting…</span>}
+            {isReading && <span>Reading…</span>}
+            {doc && <span>{doc.paragraphs.length} paragraphs parsed</span>}
           </div>
         ) : (
           <div className="dropzone__prompt">
             <span className="dropzone__icon">📄</span>
-            <p>Drag &amp; drop your PDF here</p>
+            <p>Drag &amp; drop your .docx resume here</p>
             <p className="dropzone__hint">or click to browse</p>
           </div>
         )}
@@ -113,45 +153,63 @@ function App() {
             rows={8}
           />
         </label>
-
         <button
           type="button"
           className="primary"
-          disabled={
-            !resumeText.trim() ||
-            !jobDescription.trim() ||
-            isRewriting ||
-            isExtracting
-          }
+          disabled={!doc || !jobDescription.trim() || isRewriting || isReading}
           onClick={onRewrite}
         >
           {isRewriting ? 'Tailoring…' : 'Tailor resume'}
         </button>
       </section>
 
-      {resumeText && (
+      {result && (
         <section className="panel">
-          <label className="field">
-            <span>Extracted resume text (editable)</span>
-            <textarea
-              value={resumeText}
-              onChange={(e) => setResumeText(e.target.value)}
-              rows={10}
-            />
-          </label>
-        </section>
-      )}
+          <h2 className="section-title">
+            Rewrote {replacementCount} paragraph
+            {replacementCount === 1 ? '' : 's'}
+          </h2>
 
-      {rewritten && (
-        <section className="panel">
-          <label className="field">
-            <span>Tailored resume (editable)</span>
-            <textarea
-              value={rewritten}
-              onChange={(e) => setRewritten(e.target.value)}
-              rows={16}
-            />
-          </label>
+          {result.wordCountMismatches.length > 0 && (
+            <p className="warn">
+              Dropped {result.wordCountMismatches.length} rewrite
+              {result.wordCountMismatches.length === 1 ? '' : 's'} that didn't
+              match original word count (would have broken alignment).
+            </p>
+          )}
+
+          <div className="diff-list">
+            {Object.entries(result.replacements).map(([idxStr, newText]) => {
+              const idx = Number(idxStr)
+              const original =
+                doc?.paragraphs.find((p) => p.index === idx)?.text ?? ''
+              return (
+                <div key={idx} className="diff">
+                  <div className="diff__col">
+                    <span className="diff__label">Original</span>
+                    <p>{original}</p>
+                  </div>
+                  <div className="diff__col">
+                    <span className="diff__label">Tailored</span>
+                    <p>{newText}</p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="actions">
+            <button type="button" className="primary" onClick={onDownloadDocx}>
+              Download .docx
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => void onDownloadPdf()}
+            >
+              Download as PDF
+            </button>
+          </div>
         </section>
       )}
 

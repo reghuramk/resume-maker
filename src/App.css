@@ -105,6 +105,7 @@ h1 {
   border: 1px solid #d0d0d0;
   border-radius: 8px;
   background: #fff;
+  color: #111;
   resize: vertical;
 }
 
@@ -134,4 +135,81 @@ h1 {
 .primary:disabled {
   background: #b6c4bb;
   cursor: not-allowed;
+}
+
+.secondary {
+  margin-left: 0.5rem;
+  padding: 0.7rem 1.2rem;
+  background: #fff;
+  color: #111;
+  border: 1px solid #cfcfcf;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.secondary:hover {
+  background: #f3f3f3;
+}
+
+.section-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+  color: #111;
+}
+
+.warn {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.8rem;
+  background: #fff4e0;
+  border: 1px solid #f0c060;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: #6b4500;
+}
+
+.diff-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.diff {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.diff__col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.diff__label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #888;
+}
+
+.diff__col p {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #222;
+}
+
+.actions {
+  margin-top: 1rem;
+  display: flex;
+  gap: 0.5rem;
 }
