@@ -77,3 +77,61 @@ h1 {
   color: #c0392b;
   font-size: 0.9rem;
 }
+
+.panel {
+  margin-top: 2rem;
+  text-align: left;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.field > span {
+  font-size: 0.85rem;
+  color: #555;
+  font-weight: 600;
+}
+
+.field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  border: 1px solid #d0d0d0;
+  border-radius: 8px;
+  background: #fff;
+  resize: vertical;
+}
+
+.field textarea:focus {
+  outline: none;
+  border-color: #477d59;
+  box-shadow: 0 0 0 3px rgba(71, 125, 89, 0.15);
+}
+
+.primary {
+  margin-top: 1rem;
+  padding: 0.7rem 1.2rem;
+  background: #477d59;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.primary:hover:not(:disabled) {
+  background: #3a6849;
+}
+
+.primary:disabled {
+  background: #b6c4bb;
+  cursor: not-allowed;
+}
