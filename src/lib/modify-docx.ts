@@ -18,8 +18,8 @@ export function buildModifiedDocx(
   doc: DocxDoc,
   replacements: Record<number, string>,
 ): Blob {
-  const documentXml = doc.zip.file('word/document.xml')?.asText()
-  if (!documentXml) throw new Error('Missing word/document.xml')
+  const documentXml = doc.zip.file(doc.documentPath)?.asText()
+  if (!documentXml) throw new Error(`Missing ${doc.documentPath}`)
 
   const parser = new DOMParser()
   const xmlDoc = parser.parseFromString(documentXml, 'application/xml')
@@ -45,7 +45,7 @@ export function buildModifiedDocx(
 
   const serializer = new XMLSerializer()
   const newXml = serializer.serializeToString(xmlDoc)
-  doc.zip.file('word/document.xml', newXml)
+  doc.zip.file(doc.documentPath, newXml)
 
   const out = doc.zip.generate({
     type: 'blob',

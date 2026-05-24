@@ -40,6 +40,40 @@ export async function exportDocxAsPdf(docxBlob: Blob): Promise<void> {
     ignoreHeight: false,
   })
 
+  // Word uses Symbol/Wingdings private-use codepoints for list bullets and
+  // tick marks. Browsers don't ship those fonts, so the characters render as
+  // missing-glyph tofu boxes. Swap them for standard Unicode equivalents that
+  // every font supports.
+  replaceSymbolPuaChars(win.document.body)
+
   // Give layout a tick to settle before opening print dialog.
   setTimeout(() => win.print(), 200)
+}
+
+const PUA_REPLACEMENTS: Record<string, string> = {
+  '': '•', // Symbol bullet → •
+  '': '■', // Symbol black square → ■
+  '': '□', // Symbol white square → □
+  '': '✓', // Wingdings check → ✓
+  '': '✓', // Wingdings check (alt) → ✓
+  '': '►', // Wingdings arrow → ►
+  '': '→', // Wingdings arrow right → →
+}
+
+function replaceSymbolPuaChars(root: Node) {
+  const doc = root.ownerDocument
+  if (!doc) return
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let node: Node | null
+  while ((node = walker.nextNode())) {
+    const text = node.nodeValue
+    if (!text) continue
+    let replaced = text
+    for (const [from, to] of Object.entries(PUA_REPLACEMENTS)) {
+      if (replaced.includes(from)) {
+        replaced = replaced.split(from).join(to)
+      }
+    }
+    if (replaced !== text) node.nodeValue = replaced
+  }
 }
