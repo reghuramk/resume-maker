@@ -1,0 +1,79 @@
+.page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 4rem 1.5rem;
+  text-align: center;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: 2rem;
+}
+
+.subtitle {
+  margin: 0 0 2rem;
+  color: #666;
+}
+
+.dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+  border: 2px dashed #cfcfcf;
+  border-radius: 16px;
+  background: #fafafa;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone:hover {
+  border-color: #888;
+  background: #f3f3f3;
+}
+
+.dropzone--active {
+  border-color: #477d59;
+  background: #eef5f0;
+}
+
+.dropzone__prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  color: #555;
+}
+
+.dropzone__icon {
+  font-size: 2.5rem;
+}
+
+.dropzone__hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #888;
+}
+
+.file-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.file-info strong {
+  font-size: 1rem;
+}
+
+.file-info span {
+  font-size: 0.85rem;
+  color: #777;
+}
+
+.error {
+  margin-top: 1rem;
+  color: #c0392b;
+  font-size: 0.9rem;
+}
