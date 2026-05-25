@@ -3,7 +3,6 @@ import type { DragEvent, ChangeEvent } from 'react'
 import { readDocx, type DocxDoc } from './lib/extract-docx'
 import { rewriteResume, type RewriteResult } from './lib/rewrite-resume'
 import { buildModifiedDocx } from './lib/modify-docx'
-import { exportDocxAsPdf } from './lib/export-pdf'
 import './App.css'
 
 const DOCX_MIME =
@@ -77,30 +76,16 @@ function App() {
     }
   }
 
-  const triggerBlobDownload = (blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    a.click()
-    URL.revokeObjectURL(url)
-  }
-
   const onDownloadDocx = () => {
     if (!doc || !result) return
     const blob = buildModifiedDocx(doc, result.replacements)
     const base = file?.name.replace(/\.docx$/i, '') ?? 'resume'
-    triggerBlobDownload(blob, `${base}-tailored.docx`)
-  }
-
-  const onDownloadPdf = async () => {
-    if (!doc || !result) return
-    const blob = buildModifiedDocx(doc, result.replacements)
-    try {
-      await exportDocxAsPdf(blob)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'PDF export failed.')
-    }
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${base}-tailored.docx`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   const replacementCount = result ? Object.keys(result.replacements).length : 0
@@ -199,17 +184,18 @@ function App() {
           </div>
 
           <div className="actions">
-            <button type="button" className="primary" onClick={onDownloadDocx}>
-              Download .docx
-            </button>
             <button
               type="button"
-              className="secondary"
-              onClick={() => void onDownloadPdf()}
+              className="primary"
+              onClick={onDownloadDocx}
             >
-              Download as PDF
+              Download tailored .docx
             </button>
           </div>
+          <p className="hint">
+            Open the downloaded file in <strong>Microsoft Word</strong>, then
+            File&nbsp;→&nbsp;Save&nbsp;As&nbsp;→&nbsp;PDF for the best result.
+          </p>
         </section>
       )}
 
