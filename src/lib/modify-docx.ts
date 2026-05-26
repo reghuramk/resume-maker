@@ -4,52 +4,75 @@ import type { DocxDoc } from './extract-docx'
 const DOCX_MIME =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
-/**
- * Replaces text inside specific paragraphs of a DOCX, returning a new Blob.
- *
- * Why string surgery instead of DOMParser/XMLSerializer:
- *   A full XML round-trip in the browser silently rewrites attribute order,
- *   whitespace, and namespace declarations across the ENTIRE document — even
- *   paragraphs we never touched. Word reads these subtle changes and re-flows
- *   layout (tab stops shift, dates wrap to new lines, right-aligned positions
- *   move). To keep the file byte-identical outside the paragraphs we're
- *   actually editing, we operate on the raw XML string.
- *
- * Algorithm:
- *   1. Locate every <w:p>...</w:p> span in the XML string (regex; <w:p>
- *      doesn't nest in OOXML, so non-greedy matching is safe).
- *   2. Apply edits in REVERSE index order so character offsets of earlier
- *      paragraphs aren't invalidated by length changes in later ones.
- *   3. For each paragraph we're editing, replace the first <w:t>...</w:t>'s
- *      content with the new text and empty all subsequent <w:t> elements in
- *      that paragraph. The <w:tab/>, <w:rPr>, and other run properties stay
- *      intact, which preserves the original formatting (font, size, color).
- */
+/** Insert a new bullet by cloning the structure of an existing bullet
+ *  (`templateAfterIndex`) and placing it immediately after that bullet.
+ *  The new bullet inherits every paragraph property (numbering, indent,
+ *  font, color) from the template, so it visually aligns with siblings. */
+export interface DocxInsertion {
+  templateAfterIndex: number
+  text: string
+}
+
 export function buildModifiedDocx(
   doc: DocxDoc,
   replacements: Record<number, string>,
+  insertions: DocxInsertion[] = [],
 ): Blob {
-  // Always work from the original bytes — never mutate doc.zip. This guarantees
-  // every download starts from the pristine file, even if the user clicks
-  // Download multiple times or a previous run failed mid-way.
   const zip = new PizZip(doc.originalBuffer)
   const xml = zip.file(doc.documentPath)?.asText()
   if (!xml) throw new Error(`Missing ${doc.documentPath}`)
 
   const paraSpans = findParagraphSpans(xml)
 
-  const edits = Object.entries(replacements)
-    .map(([k, v]) => [Number(k), v] as const)
-    .filter(([idx]) => paraSpans[idx] !== undefined)
-    .sort((a, b) => b[0] - a[0]) // reverse — apply later edits first
+  type Op =
+    | { kind: 'edit'; idx: number; text: string }
+    | { kind: 'insert'; afterIdx: number; text: string }
+
+  const ops: Op[] = [
+    ...Object.entries(replacements)
+      .map(([k, v]) => ({ kind: 'edit' as const, idx: Number(k), text: v }))
+      .filter((o) => paraSpans[o.idx] !== undefined),
+    ...insertions
+      .filter((i) => paraSpans[i.templateAfterIndex] !== undefined)
+      .map((i) => ({
+        kind: 'insert' as const,
+        afterIdx: i.templateAfterIndex,
+        text: i.text,
+      })),
+  ]
+
+  // Apply highest-index ops first so earlier ops aren't invalidated by
+  // length changes downstream. At the same index, run inserts AFTER the
+  // edit on the same paragraph (template gets text-swapped first, then
+  // cloned — they share structure either way).
+  ops.sort((a, b) => {
+    const ai = a.kind === 'edit' ? a.idx : a.afterIdx
+    const bi = b.kind === 'edit' ? b.idx : b.afterIdx
+    if (ai !== bi) return bi - ai
+    if (a.kind === 'edit' && b.kind === 'insert') return -1
+    if (a.kind === 'insert' && b.kind === 'edit') return 1
+    return 0
+  })
 
   let result = xml
-  for (const [idx, newText] of edits) {
-    const { start, end } = paraSpans[idx]
-    const before = result.slice(0, start)
-    const para = result.slice(start, end)
-    const after = result.slice(end)
-    result = before + replaceFirstWtContent(para, newText) + after
+  for (const op of ops) {
+    if (op.kind === 'edit') {
+      const { start, end } = paraSpans[op.idx]
+      const para = result.slice(start, end)
+      result =
+        result.slice(0, start) +
+        replaceFirstWtContent(para, op.text) +
+        result.slice(end)
+    } else {
+      // Clone the template bullet's full <w:p>...</w:p> structure, replace
+      // its text, splice in right after the template. Numbering, indent,
+      // font, and color all carry over because the cloned XML keeps every
+      // <w:pPr> / <w:rPr> intact.
+      const { start, end } = paraSpans[op.afterIdx]
+      const template = result.slice(start, end)
+      const clone = replaceFirstWtContent(template, op.text)
+      result = result.slice(0, end) + clone + result.slice(end)
+    }
   }
 
   zip.file(doc.documentPath, result)
@@ -60,7 +83,6 @@ function findParagraphSpans(
   xml: string,
 ): Array<{ start: number; end: number }> {
   const spans: Array<{ start: number; end: number }> = []
-  // <w:p ...> ... </w:p>  OR  <w:p .../>  (self-closing, empty paragraph)
   const regex = /<w:p(?:\s[^>]*)?(?:\/>|>[\s\S]*?<\/w:p>)/g
   let m: RegExpExecArray | null
   while ((m = regex.exec(xml)) !== null) {
@@ -71,7 +93,6 @@ function findParagraphSpans(
 
 function replaceFirstWtContent(paraXml: string, newText: string): string {
   let first = true
-  // <w:t [attrs]>content</w:t>  OR  <w:t [attrs]/>
   const regex = /<w:t(?:\s[^>]*)?(?:\/>|>[\s\S]*?<\/w:t>)/g
   return paraXml.replace(regex, () => {
     if (first) {

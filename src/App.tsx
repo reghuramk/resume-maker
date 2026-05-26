@@ -78,7 +78,11 @@ function App() {
 
   const onDownloadDocx = () => {
     if (!doc || !result) return
-    const blob = buildModifiedDocx(doc, result.replacements)
+    const insertions = result.generatedBullets.map((g) => ({
+      templateAfterIndex: g.templateAfterIndex,
+      text: g.text,
+    }))
+    const blob = buildModifiedDocx(doc, result.replacements, insertions)
     const base = file?.name.replace(/\.docx$/i, '') ?? 'resume'
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -163,11 +167,83 @@ function App() {
             </p>
           )}
 
+          {result.bumpedForRepetition.length > 0 && (
+            <p className="warn">
+              Kept {result.bumpedForRepetition.length} original bullet
+              {result.bumpedForRepetition.length === 1 ? '' : 's'} unchanged
+              because the rewrite would have repeated a must-have keyword more
+              than {2} times.
+            </p>
+          )}
+
+          {result.alignmentRelaxed.length > 0 && (
+            <p className="hint">
+              {result.alignmentRelaxed.length} bullet
+              {result.alignmentRelaxed.length === 1 ? '' : 's'} accepted with
+              relaxed word-count (minor line-wrap shift possible) to preserve
+              must-have coverage that would otherwise be missing.
+            </p>
+          )}
+
+          {result.resurrectedForCoverage.length > 0 && (
+            <p className="hint">
+              {result.resurrectedForCoverage.length} rewrite
+              {result.resurrectedForCoverage.length === 1 ? '' : 's'}{' '}
+              resurrected to fill must-haves that would otherwise be missing.
+              A keyword may appear in 3 bullets instead of 2 as a result — the
+              trade-off for higher Boolean coverage.
+            </p>
+          )}
+
+          <div
+            className={`boolean-summary ${
+              result.booleanMatch.passed
+                ? 'boolean-summary--pass'
+                : 'boolean-summary--fail'
+            }`}
+          >
+            <div className="boolean-summary__head">
+              <strong>
+                Recruiter Boolean check:{' '}
+                {result.booleanMatch.passed ? 'PASSED' : 'INCOMPLETE'}
+              </strong>
+              <span>
+                {result.booleanMatch.matched.length} /{' '}
+                {result.mustHaves.length} must-haves present (
+                {result.booleanMatch.scorePct}%)
+              </span>
+            </div>
+            <div className="boolean-summary__row">
+              <span className="boolean-summary__label">Matched:</span>
+              <span>
+                {result.booleanMatch.matched.map((m) => m.term).join(', ') ||
+                  '—'}
+              </span>
+            </div>
+            {result.booleanMatch.missing.length > 0 && (
+              <div className="boolean-summary__row">
+                <span className="boolean-summary__label">
+                  Still missing:
+                </span>
+                <span>
+                  {result.booleanMatch.missing.map((m) => m.term).join(', ')}
+                </span>
+              </div>
+            )}
+            <p className="hint" style={{ marginTop: '0.5rem' }}>
+              This simulates the Boolean AND-query a recruiter would run in
+              Workday / Greenhouse / Lever. Missing must-haves likely have no
+              natural home in your existing experience — consider adding a
+              skills line or a project bullet manually if they're load-bearing.
+            </p>
+          </div>
+
           <div className="diff-list">
             {Object.entries(result.replacements).map(([idxStr, newText]) => {
               const idx = Number(idxStr)
               const original =
                 doc?.paragraphs.find((p) => p.index === idx)?.text ?? ''
+              const added = result.addedByIndex[idx] ?? []
               return (
                 <div key={idx} className="diff">
                   <div className="diff__col">
@@ -177,11 +253,45 @@ function App() {
                   <div className="diff__col">
                     <span className="diff__label">Tailored</span>
                     <p>{newText}</p>
+                    {added.length > 0 && (
+                      <span className="badge badge--good">
+                        +{added.length} must-have: {added.join(', ')}
+                      </span>
+                    )}
                   </div>
                 </div>
               )
             })}
           </div>
+
+          {result.generatedBullets.length > 0 && (
+            <div className="generated-block">
+              <h3 className="section-title">
+                {result.generatedBullets.length} new bullet
+                {result.generatedBullets.length === 1 ? '' : 's'} generated to
+                cover missing must-haves
+              </h3>
+              <p className="hint">
+                Each will be inserted into your resume under the listed role,
+                matching the surrounding bullet's formatting exactly. Review
+                them before downloading — these are <strong>fabricated</strong>{' '}
+                to fit must-haves your existing experience didn't cover.
+              </p>
+              {result.generatedBullets.map((g, i) => (
+                <div key={i} className="generated-bullet">
+                  <div className="generated-bullet__meta">
+                    <span className="badge badge--good">
+                      +{g.mustHaveTerm}
+                    </span>
+                    <span className="generated-bullet__role">
+                      attributed to: <strong>{g.roleHeader}</strong>
+                    </span>
+                  </div>
+                  <p>{g.text}</p>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="actions">
             <button

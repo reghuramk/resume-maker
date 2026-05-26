@@ -221,3 +221,97 @@ h1 {
   color: #666;
   line-height: 1.5;
 }
+
+.badge {
+  display: inline-block;
+  margin-top: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.badge--muted {
+  background: #ececec;
+  color: #555;
+}
+
+.badge--good {
+  background: #e6f3eb;
+  color: #2c5f3f;
+  border: 1px solid #cfe5d6;
+}
+
+.boolean-summary {
+  margin: 1rem 0;
+  padding: 1rem;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.boolean-summary--pass {
+  background: #e6f3eb;
+  border: 1px solid #cfe5d6;
+  color: #1f4a2f;
+}
+
+.boolean-summary--fail {
+  background: #fff4e0;
+  border: 1px solid #f0c060;
+  color: #5a3d00;
+}
+
+.boolean-summary__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.boolean-summary__row {
+  margin: 0.25rem 0;
+}
+
+.boolean-summary__label {
+  font-weight: 600;
+  margin-right: 0.4rem;
+}
+
+.generated-block {
+  margin: 1rem 0;
+  padding: 1rem;
+  border-radius: 10px;
+  background: #f6f1e5;
+  border: 1px solid #d9c89a;
+}
+
+.generated-bullet {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #e5e0d0;
+}
+
+.generated-bullet p {
+  margin: 0.4rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: #222;
+}
+
+.generated-bullet__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.generated-bullet__role {
+  font-size: 0.8rem;
+  color: #666;
+}
