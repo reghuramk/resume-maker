@@ -289,6 +289,11 @@ h1 {
   border: 1px solid #d9c89a;
 }
 
+.generated-block--strong {
+  background: #fde7e0;
+  border: 1px solid #e8a48a;
+}
+
 .generated-bullet {
   margin-top: 0.75rem;
   padding: 0.75rem;

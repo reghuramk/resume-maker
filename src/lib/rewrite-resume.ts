@@ -5,6 +5,7 @@ import {
   checkBooleanQuery,
   bulletAddsMustHave,
   bulletContainsMustHave,
+  detectStackMismatch,
   type MustHave,
   type BooleanMatch,
 } from './ats-scorer'
@@ -82,11 +83,38 @@ Now write the final rewrites. For each bullet you're modifying:
 Bullets where no keyword could be placed: OMIT from your output. Don't generate cosmetic edits.
 
 ==============================
+ACTIVITY-LOCKED SWAPS (BACKEND vs FRONTEND vs DEVOPS vs AI)
+==============================
+
+Before adding a keyword to a bullet, classify the bullet's primary activity:
+
+- BACKEND activity: REST APIs, GraphQL servers, gRPC, microservices, connection pooling, database queries, async workers, message queues, server-side data processing.
+- FRONTEND activity: UI components, dashboards, pages, user-facing flows, client-side state.
+- DEVOPS activity: containerization, orchestration, CI/CD, infrastructure-as-code, observability/monitoring setup.
+- AI activity: LLM integrations, embeddings, RAG, prompt engineering, ML pipelines.
+
+A keyword may ONLY land in a bullet whose activity matches its own category:
+
+- Frontend frameworks (React, Next.js, Vue, Angular, Svelte, Redux) → ONLY frontend bullets. Never a bullet about REST APIs, gRPC, microservices, or queues.
+- Backend frameworks (Express, NestJS, FastAPI, Spring Boot) → ONLY backend bullets.
+- Databases (PostgreSQL, MySQL, DynamoDB) → backend or devops bullets — NEVER frontend bullets.
+- gRPC / GraphQL server / REST API → backend bullets.
+- Kubernetes / Docker / Terraform → devops bullets.
+
+If a must-have's only natural-fit bullet doesn't exist in this resume, LEAVE IT UNPLACED. Missing coverage is better than a sentence that doesn't describe a real system.
+
+==============================
 NEGATIVE EXAMPLES (DO NOT DO THESE)
 ==============================
 
+✗ "Architected a production-grade quoting platform in TypeScript, building REST APIs for 10K+ daily users, processing 1K+ quotes/day via connection pooling and Next.js-based dynamic interfaces."
+   → Next.js is a FRONTEND framework. This bullet's activity is BACKEND (REST APIs, connection pooling). Frontend frameworks NEVER land in backend bullets. Skip Next.js for this bullet entirely.
+
+✗ "Migrated inter-service communication to gRPC, reducing latency by 40%; a Next.js gateway consumed gRPC to serve structured frontend responses."
+   → "Next.js gateway" is not a real architecture — Next.js is a React framework, not a server-side gateway service. Real gateways are Express / Nginx / Kong. Skip Next.js for this bullet.
+
 ✗ "Python FastAPI data processing pipeline using Spring Batch"
-   → Spring Batch is Java. You cannot use it from Python. Cross-stack nonsense.
+   → Spring Batch is Java-only. You cannot use it from Python. Cross-stack nonsense.
 
 ✗ "AWS Lambda-powered assistants and Serverless workflows for quote generation, collaborating with ML teams"
    → Lambda is compute, not an LLM. Replace OpenAI with LangChain / Anthropic / another LLM tool — never with infrastructure.
@@ -136,7 +164,15 @@ Return JSON: { "replacements": { "<index>": "<rewritten text>", ... } }
 
 Include only the bullets you actually modified. Bullets that don't have a keyword placement → omit.
 
-Before responding, re-run the STEP 4 checklist one more time. If anything fails, fix or drop.
+FINAL SELF-CHECK (do this for every rewrite before responding):
+Read each rewrite as if you were a senior engineer reviewing the resume. Ask: "Could this system actually exist? Does the tech stack inside this single sentence make architectural sense?"
+- A frontend framework cannot be a gateway.
+- A Python service cannot use a Java-only library (e.g. Spring Batch).
+- Lambda is compute, not an LLM.
+- Microservices and connection pooling are backend concerns — frontend frameworks don't belong there.
+If a rewrite describes an impossible or implausible system, REMOVE it from your output (revert to the original) rather than ship it.
+
+Re-run the STEP 4 checklist one more time. If anything fails, fix or drop.
 
 No commentary outside the JSON.`
 
@@ -175,6 +211,16 @@ export interface RewriteResult {
    *  currently-missing must-have. Trade-off: one keyword may now appear in
    *  3 bullets instead of 2, but Boolean coverage is higher. */
   resurrectedForCoverage: number[]
+  /** Tier-3: low-value bullets that were ENTIRELY REPLACED with fabricated
+   *  content to cover a still-missing must-have. The replacement uses a
+   *  scale figure already present in the resume; the original text is
+   *  discarded. Strong UI warning surfaces these for review. */
+  fabricatedReplacements: Array<{
+    index: number
+    originalText: string
+    newText: string
+    mustHaveTerm: string
+  }>
 }
 
 function wordCount(s: string): number {
@@ -458,6 +504,168 @@ No commentary.`
   return out
 }
 
+interface FabricatedReplacement {
+  index: number
+  text: string
+  missingTerm: string
+  originalText: string
+}
+
+/** Tier 3 eligibility: which existing bullets can be replaced with
+ *  fabricated content? A bullet is eligible only if ALL four of the rules
+ *  the user agreed to are satisfied. */
+function findReplaceableBullets(
+  paragraphs: DocxParagraph[],
+  acceptedRewrites: Record<number, string>,
+  mustHaves: MustHave[],
+  roles: WorkRole[],
+): number[] {
+  const roleOfBullet = new Map<number, WorkRole>()
+  for (const role of roles) {
+    for (const idx of role.bulletIndices) roleOfBullet.set(idx, role)
+  }
+  // The most-recent bullet under the most-recent role is the first bullet of
+  // the first role — top of page, top of resume's high-signal real estate.
+  const mostRecentBullet = roles[0]?.bulletIndices[0]
+
+  const eligible: number[] = []
+  for (const p of paragraphs) {
+    if (p.section !== 'work' || !p.isBullet) continue
+    if (!p.text.trim()) continue
+    // Rule 1: not already a tailored rewrite (rewrite found a keyword fit).
+    if (p.index in acceptedRewrites) continue
+    // Rule 2: original contains zero must-haves (already a generic line).
+    if (mustHaves.some((m) => bulletContainsMustHave(p.text, m) === 1)) continue
+    // Rule 3: not the only bullet in its role.
+    const role = roleOfBullet.get(p.index)
+    if (!role || role.bulletIndices.length <= 1) continue
+    // Rule 4: not the most-recent bullet under the most-recent role.
+    if (p.index === mostRecentBullet) continue
+    eligible.push(p.index)
+  }
+  return eligible
+}
+
+/** Tier 3 generation: replace low-value bullets with fabricated content that
+ *  covers still-missing must-haves. Uses scale figures from the candidate's
+ *  resume (so metrics blend in) and refuses to ship anything with a stack
+ *  mismatch or implausible word count. */
+async function generateFabricatedReplacements(args: {
+  missing: MustHave[]
+  eligibleIndices: number[]
+  paragraphs: DocxParagraph[]
+  roles: WorkRole[]
+  jobDescription: string
+  fullResumeText: string
+}): Promise<FabricatedReplacement[]> {
+  if (!client) throw new Error('client not initialized')
+  if (args.missing.length === 0 || args.eligibleIndices.length === 0) return []
+
+  const roleOfBullet = new Map<number, WorkRole>()
+  for (const role of args.roles) {
+    for (const idx of role.bulletIndices) roleOfBullet.set(idx, role)
+  }
+
+  const eligibleBlock = args.eligibleIndices
+    .map((idx) => {
+      const p = args.paragraphs.find((p) => p.index === idx)
+      const role = roleOfBullet.get(idx)
+      if (!p || !role) return ''
+      return `[${idx}] role: "${role.header}" (avg ${role.avgWords} words)\n  original (will be discarded): "${p.text}"`
+    })
+    .filter(Boolean)
+    .join('\n\n')
+
+  const missingBlock = args.missing
+    .map((m) => `- "${m.term}" (${m.category}); aliases recognized: ${m.aliases.join(', ')}`)
+    .join('\n')
+
+  const SYSTEM = `You write FABRICATED resume bullets to cover JD must-haves that have no natural home in the candidate's actual experience. Each fabricated bullet REPLACES an existing low-value bullet entirely.
+
+RULES:
+
+1. Use the assigned must-have term verbatim (one of its aliases).
+2. The bullet must describe a plausible system for the role's seniority and timeframe — coherent architecture, real-world tech stack pairings.
+3. Match the role's average word count (±5 words).
+4. Use scale figures and metrics that ALREADY APPEAR somewhere in the candidate's resume. If the resume mentions "10K+ users", "1K+ quotes/day", "99.8% success rate", "across 4 microservices" — reuse those exact scale shapes. Do NOT invent new ones.
+5. Avoid round-number metrics that signal AI generation (50%, 100%, 2x, 10x). Prefer odd or asymmetric figures lifted from elsewhere in the resume.
+6. Respect category constraints: frontend framework keywords belong in frontend activities; backend frameworks in backend activities; etc.
+
+ASSIGNMENT:
+For each missing must-have, pick ONE eligible bullet to replace (each eligible bullet can be used at most once). Try to match the role's domain — a frontend keyword should replace a bullet in a role that has other frontend signals if possible. If a missing must-have has no plausible home even among the eligible bullets, SKIP it.
+
+Output JSON: { "replacements": [ { "originalIndex": <number>, "missingTerm": "<term>", "text": "<fabricated bullet>" } ] }
+No commentary.`
+
+  const response = await client.chat.completions.create({
+    model: MODEL,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: SYSTEM },
+      {
+        role: 'user',
+        content: [
+          `=== JOB DESCRIPTION ===`,
+          args.jobDescription,
+          ``,
+          `=== CANDIDATE'S FULL RESUME (for scale-figure reuse) ===`,
+          args.fullResumeText,
+          ``,
+          `=== ELIGIBLE LOW-VALUE BULLETS (any can be replaced) ===`,
+          eligibleBlock,
+          ``,
+          `=== STILL-MISSING MUST-HAVES ===`,
+          missingBlock,
+        ].join('\n'),
+      },
+    ],
+  })
+
+  const raw = response.choices[0]?.message?.content ?? '{}'
+  const parsed = JSON.parse(raw) as {
+    replacements?: Array<{
+      originalIndex: number
+      missingTerm: string
+      text: string
+    }>
+  }
+
+  const out: FabricatedReplacement[] = []
+  const usedIndices = new Set<number>()
+  for (const r of parsed.replacements ?? []) {
+    if (typeof r.originalIndex !== 'number') continue
+    if (!args.eligibleIndices.includes(r.originalIndex)) continue
+    if (usedIndices.has(r.originalIndex)) continue
+    if (typeof r.text !== 'string' || r.text.trim().length === 0) continue
+
+    // Must contain the assigned missing term's alias.
+    const term = args.missing.find((m) => m.term === r.missingTerm)
+    if (!term) continue
+    const lower = r.text.toLowerCase()
+    if (!term.aliases.some((a) => lower.includes(a.toLowerCase()))) continue
+
+    // Word count must be within ±5 of the role avg.
+    const role = roleOfBullet.get(r.originalIndex)
+    if (!role) continue
+    const w = wordCount(r.text)
+    if (Math.abs(w - role.avgWords) > 5) continue
+
+    // Stack-mismatch guard (same rule as for regular rewrites).
+    if (detectStackMismatch(r.text)) continue
+
+    const originalText =
+      args.paragraphs.find((p) => p.index === r.originalIndex)?.text ?? ''
+    out.push({
+      index: r.originalIndex,
+      text: r.text.trim(),
+      missingTerm: r.missingTerm,
+      originalText,
+    })
+    usedIndices.add(r.originalIndex)
+  }
+  return out
+}
+
 async function callLlm(
   pending: PendingBullet[],
   jobDescription: string,
@@ -637,6 +845,26 @@ export async function rewriteResume(args: {
         mustHaves,
       )
 
+      // Hard sanity check: reject incoherent rewrites that mix a frontend
+      // framework with strong backend activity (e.g. "Next.js gateway
+      // consumed gRPC"). No amount of retry will fix this — the model
+      // misclassified the bullet. Treat as a coverage failure so the retry
+      // round can replace it; if it persists, the bullet stays original.
+      const mismatch = detectStackMismatch(candidate)
+      if (mismatch) {
+        nextPending.push({
+          ...b,
+          lastAttempt: {
+            text: candidate,
+            words: got,
+            addedMustHaves: [],
+            wordCountFailed: false,
+            coverageFailed: true,
+          },
+        })
+        continue
+      }
+
       const wordCountOk =
         Math.abs(got - b.targetWords) <= WORD_COUNT_TOLERANCE
       const coverageOk = addedMustHaves.length >= 1
@@ -741,6 +969,8 @@ export async function rewriteResume(args: {
     if (missingNow.size === 0) break
     const rewriteText = accepted[idx] // pre-cap accepted map keeps the text
     if (!rewriteText) continue
+    // Don't resurrect an incoherent rewrite even for coverage.
+    if (detectStackMismatch(rewriteText)) continue
 
     // Which currently-missing must-haves does this rewrite plug?
     const filledTerms: string[] = []
@@ -789,9 +1019,45 @@ export async function rewriteResume(args: {
     MAX_BULLETS_PER_KEYWORD,
   )
 
-  // Final Boolean check including the surviving gap-fill bullets.
-  const finalText =
+  // Mid-point Boolean check after rewrites + gap-fill bullets.
+  const postGapText =
     interimText + '\n' + generatedBullets.map((g) => g.text).join('\n')
+  const postGapMissing = checkBooleanQuery(postGapText, mustHaves).missing
+
+  // Tier 3: replace low-value bullets with fabricated content for any
+  // must-haves that still couldn't find a home. Always runs (default-on).
+  const fabricatedReplacements: RewriteResult['fabricatedReplacements'] = []
+  if (postGapMissing.length > 0) {
+    const eligibleForReplace = findReplaceableBullets(
+      args.paragraphs,
+      finalAccepted,
+      mustHaves,
+      roles,
+    )
+    const fabricated = await generateFabricatedReplacements({
+      missing: postGapMissing,
+      eligibleIndices: eligibleForReplace,
+      paragraphs: args.paragraphs,
+      roles,
+      jobDescription: args.jobDescription,
+      fullResumeText,
+    })
+    for (const fr of fabricated) {
+      finalAccepted[fr.index] = fr.text
+      fabricatedReplacements.push({
+        index: fr.index,
+        originalText: fr.originalText,
+        newText: fr.text,
+        mustHaveTerm: fr.missingTerm,
+      })
+    }
+  }
+
+  // Final Boolean check including fabricated replacements + gap-fill bullets.
+  const finalText =
+    bullets.map((b) => finalAccepted[b.index] ?? b.text).join('\n') +
+    '\n' +
+    generatedBullets.map((g) => g.text).join('\n')
   const booleanMatch = checkBooleanQuery(finalText, mustHaves)
 
   // Cleanup: scrub `addedByIndex` entries only for rewrites that stayed
@@ -809,5 +1075,6 @@ export async function rewriteResume(args: {
     bumpedForRepetition,
     alignmentRelaxed,
     resurrectedForCoverage,
+    fabricatedReplacements,
   }
 }

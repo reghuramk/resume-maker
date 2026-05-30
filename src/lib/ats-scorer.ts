@@ -126,6 +126,68 @@ export function bulletContainsMustHave(text: string, m: MustHave): 0 | 1 {
   return m.aliases.some((a) => containsToken(hay, a.toLowerCase())) ? 1 : 0
 }
 
+/**
+ * Detects rewrites that mix a frontend framework with strong backend
+ * activity markers — the failure mode where the LLM stuffs "Next.js" into
+ * a bullet about REST APIs and connection pooling. The model is told not
+ * to do this in the prompt; this is the belt-and-suspenders code check.
+ *
+ * Returns the offending pair if detected (so the UI can surface it),
+ * otherwise null.
+ */
+export function detectStackMismatch(
+  bullet: string,
+): { frontendTerm: string; backendTerm: string } | null {
+  const hay = bullet.toLowerCase()
+  // Frameworks that are unambiguously frontend in resume context. React is
+  // ambiguous on its own (could be React Native, full-stack components,
+  // etc.) so we skip it here to avoid false positives. Next.js, Vue,
+  // Angular, Svelte, and Redux are far more clearly frontend.
+  const FRONTEND_ONLY = [
+    'next.js',
+    'nextjs',
+    'next js',
+    'vue.js',
+    'vuejs',
+    'angular',
+    'svelte',
+    'redux',
+  ]
+  // Activities a real frontend bullet would not describe. If one of these
+  // appears alongside a frontend-only term, the bullet is incoherent.
+  const STRONG_BACKEND = [
+    'rest api',
+    'restful',
+    'rest apis',
+    'grpc',
+    'connection pool',
+    'inter-service',
+    'microservice',
+    'message queue',
+    'event bridge',
+    'sqs',
+    'kafka',
+    'kubernetes pod',
+    'distributed system',
+    'async worker',
+    'data pipeline',
+  ]
+  let frontendHit: string | null = null
+  for (const f of FRONTEND_ONLY) {
+    if (containsToken(hay, f)) {
+      frontendHit = f
+      break
+    }
+  }
+  if (!frontendHit) return null
+  for (const b of STRONG_BACKEND) {
+    if (containsToken(hay, b)) {
+      return { frontendTerm: frontendHit, backendTerm: b }
+    }
+  }
+  return null
+}
+
 /** True iff `bullet` contains an alias for some must-have that `original` did not. */
 export function bulletAddsMustHave(
   bullet: string,

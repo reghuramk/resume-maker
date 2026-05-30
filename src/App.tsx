@@ -264,6 +264,40 @@ function App() {
             })}
           </div>
 
+          {result.fabricatedReplacements.length > 0 && (
+            <div className="generated-block generated-block--strong">
+              <h3 className="section-title">
+                ⚠ {result.fabricatedReplacements.length} bullet
+                {result.fabricatedReplacements.length === 1 ? '' : 's'}{' '}
+                replaced with fabricated content (Tier 3)
+              </h3>
+              <p className="hint">
+                The original bullets had zero JD vocabulary, and the
+                must-haves below had no natural home in your real experience.
+                Each replacement is{' '}
+                <strong>completely fabricated</strong> using scale figures
+                already in your resume. Read carefully before downloading and
+                decide whether you're comfortable shipping it.
+              </p>
+              {result.fabricatedReplacements.map((f) => (
+                <div key={f.index} className="generated-bullet">
+                  <div className="generated-bullet__meta">
+                    <span className="badge badge--good">
+                      +{f.mustHaveTerm}
+                    </span>
+                    <span className="generated-bullet__role">
+                      replaces a low-value bullet
+                    </span>
+                  </div>
+                  <p style={{ textDecoration: 'line-through', color: '#999' }}>
+                    {f.originalText}
+                  </p>
+                  <p>{f.newText}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
           {result.generatedBullets.length > 0 && (
             <div className="generated-block">
               <h3 className="section-title">
