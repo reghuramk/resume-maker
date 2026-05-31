@@ -9,6 +9,7 @@ import {
   type MustHave,
   type BooleanMatch,
 } from './ats-scorer'
+import { extractPersona, describePersona, type Persona } from './persona'
 
 const apiKey = import.meta.env.VITE_OPENAI_API_KEY
 
@@ -221,6 +222,21 @@ export interface RewriteResult {
     newText: string
     mustHaveTerm: string
   }>
+  /** Which rewrite mode actually ran:
+   *   - "persona-transmute": user asked for persona mode AND extraction was
+   *     confident; every bullet's tech stack was transmuted to the persona.
+   *   - "keyword-swap": the default mode; either the user didn't ask for
+   *     persona mode, or extraction came back low-confidence and we fell
+   *     back automatically. */
+  mode: 'persona-transmute' | 'keyword-swap'
+  /** Populated when mode === 'persona-transmute'. */
+  persona?: Persona
+  /** Populated when persona mode was REQUESTED but we fell back. Tells the
+   *  user why (e.g. "JD too generic to extract a confident persona"). */
+  personaFallbackReason?: string
+  /** Must-have terms appended to the SKILLS section because they were still
+   *  missing globally after every other pass. Keyed by paragraph index. */
+  skillsPaddingApplied: Record<number, string[]>
 }
 
 function wordCount(s: string): number {
@@ -232,13 +248,22 @@ function wordCount(s: string): number {
  *  blocked only if it (a) ADDS a new occurrence of some keyword AND (b) that
  *  would push the keyword's total past the cap. Rewrites that don't change
  *  a keyword's count are always allowed; rewrites that REMOVE a keyword
- *  somewhere can free budget for other rewrites later. */
+ *  somewhere can free budget for other rewrites later.
+ *
+ *  `exemptLowerTerms`: keywords that bypass the cap entirely. In persona
+ *  transmute mode, the persona's core stack (primary language, backend
+ *  framework, etc.) goes in here — a Go resume *should* say "Golang" in
+ *  every backend bullet without that counting as keyword stuffing. */
 function enforceRepetitionCap(
   bullets: Array<{ index: number; originalText: string }>,
   acceptedRewrites: Record<number, string>,
   mustHaves: MustHave[],
   cap: number,
+  exemptLowerTerms: Set<string> = new Set(),
 ): { final: Record<number, string>; bumped: number[] } {
+  const isExempt = (m: MustHave): boolean =>
+    exemptLowerTerms.has(m.term.toLowerCase()) ||
+    m.aliases.some((a) => exemptLowerTerms.has(a.toLowerCase()))
   // Seed: count of bullets containing each must-have ASSUMING all originals
   // are still in place. As we accept rewrites, we adjust this count.
   const counts = new Map<string, number>()
@@ -258,6 +283,7 @@ function enforceRepetitionCap(
     // Decide whether this rewrite causes any must-have to exceed cap.
     let blocked = false
     for (const m of mustHaves) {
+      if (isExempt(m)) continue
       const inOrig = bulletContainsMustHave(b.originalText, m)
       const inNew = bulletContainsMustHave(rewrite, m)
       const delta = inNew - inOrig
@@ -290,14 +316,19 @@ function enforceRepetitionCap(
 }
 
 /** Same idea but for gap-fill bullets: they're additive (no original to
- *  subtract). Drop any gap-fill that would push a must-have past the cap. */
+ *  subtract). Drop any gap-fill that would push a must-have past the cap.
+ *  Same `exemptLowerTerms` semantics as above. */
 function filterGapFillsByCap(
   bullets: Array<{ originalText: string }>,
   acceptedRewrites: Record<number, string>,
   gapFills: GapFillBullet[],
   mustHaves: MustHave[],
   cap: number,
+  exemptLowerTerms: Set<string> = new Set(),
 ): GapFillBullet[] {
+  const isExempt = (m: MustHave): boolean =>
+    exemptLowerTerms.has(m.term.toLowerCase()) ||
+    m.aliases.some((a) => exemptLowerTerms.has(a.toLowerCase()))
   const counts = new Map<string, number>()
   for (const m of mustHaves) {
     let c = 0
@@ -312,6 +343,7 @@ function filterGapFillsByCap(
   for (const g of gapFills) {
     let blocked = false
     for (const m of mustHaves) {
+      if (isExempt(m)) continue
       const inGap = bulletContainsMustHave(g.text, m)
       if (inGap === 0) continue
       const newTotal = (counts.get(m.term) ?? 0) + inGap
@@ -674,6 +706,12 @@ async function callLlm(
   /** Must-haves the resume-as-a-whole still lacks. Hints the model toward
    *  filling these gaps when natural. */
   resumeGaps: MustHave[],
+  /** Optional system prompt override; when set (persona mode), replaces the
+   *  default keyword-swap system prompt with a stack-transmute one. */
+  systemPromptOverride?: string,
+  /** Block describing the active persona; appended to the user message in
+   *  persona mode so the model has the full transmute target inline. */
+  personaBlock?: string,
 ): Promise<Record<number, string>> {
   if (!client) throw new Error('client not initialized')
 
@@ -737,31 +775,48 @@ async function callLlm(
         ]
       : []
 
+  const systemPrompt = systemPromptOverride ?? SYSTEM_PROMPT
+  const userContent = personaBlock
+    ? [
+        `=== JOB DESCRIPTION ===`,
+        jobDescription,
+        ``,
+        personaBlock,
+        ``,
+        `=== RECRUITER MUST-HAVES (Boolean AND-query terms — layered on after persona transmute) ===`,
+        mustHavesBlock,
+        ...gapsBlock,
+        ``,
+        `=== CANDIDATE'S FULL RESUME (context only) ===`,
+        fullResumeText,
+        ``,
+        `=== BULLETS TO REWRITE ===`,
+        lines.join('\n\n'),
+      ].join('\n')
+    : [
+        `=== JOB DESCRIPTION ===`,
+        jobDescription,
+        ``,
+        `=== RECRUITER MUST-HAVES (Boolean AND-query terms) ===`,
+        `Your tailored resume will be checked against these. Each one is matched case-insensitively against its aliases. The resume passes only when ALL must-haves are present somewhere.`,
+        mustHavesBlock,
+        ...gapsBlock,
+        ``,
+        `=== CANDIDATE'S FULL RESUME (context only — do NOT rewrite paragraphs that aren't in the list below) ===`,
+        fullResumeText,
+        ``,
+        `=== BULLETS TO REWRITE (work experience only) ===`,
+        lines.join('\n\n'),
+        ``,
+        `Return the JSON object. Before responding: (a) each rewrite uses must-have aliases verbatim where possible; (b) word counts are in range; (c) prefer placing keywords that fill resume-wide gaps.`,
+      ].join('\n')
+
   const response = await client.chat.completions.create({
     model: MODEL,
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: [
-          `=== JOB DESCRIPTION ===`,
-          jobDescription,
-          ``,
-          `=== RECRUITER MUST-HAVES (Boolean AND-query terms) ===`,
-          `Your tailored resume will be checked against these. Each one is matched case-insensitively against its aliases. The resume passes only when ALL must-haves are present somewhere.`,
-          mustHavesBlock,
-          ...gapsBlock,
-          ``,
-          `=== CANDIDATE'S FULL RESUME (context only — do NOT rewrite paragraphs that aren't in the list below) ===`,
-          fullResumeText,
-          ``,
-          `=== BULLETS TO REWRITE (work experience only) ===`,
-          lines.join('\n\n'),
-          ``,
-          `Return the JSON object. Before responding: (a) each rewrite uses must-have aliases verbatim where possible; (b) word counts are in range; (c) prefer placing keywords that fill resume-wide gaps.`,
-        ].join('\n'),
-      },
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userContent },
     ],
   })
 
@@ -774,9 +829,175 @@ async function callLlm(
   return out
 }
 
+const PERSONA_SYSTEM_PROMPT_BASE = `You are completely transmuting a resume's tech stack to fit a specific technical persona. The candidate is presenting as the persona described below. Rewrite every eligible bullet so the language, frameworks, databases, and infrastructure all align with that persona.
+
+ACTIVITY MATCHING (REVISED — read carefully):
+For each bullet, decide whether its underlying ACTIVITY is pure UI work, mixed backend/full-stack work, or pure server-side work.
+
+- PURE UI bullets (React components, dashboards, layouts, design systems, user-facing flows): under a BACKEND persona → SKIP. Under a FRONTEND or FULLSTACK persona → transmute.
+- PURE BACKEND bullets (REST APIs, queues, microservices, database work, async workers): under a FRONTEND persona → SKIP. Under BACKEND or FULLSTACK → transmute.
+- MIXED bullets (Node.js + React, Express + Vue, "full-stack features", Socket.io + frontend): under any persona → TRANSMUTE the backend/runtime tech to the persona's language and framework. Keep frontend mentions where they describe real candidate work (a backend candidate can have shipped APIs that React consumed; that's fine to say).
+
+CRITICAL — common runtime-vs-framework confusion:
+- Node.js is a BACKEND runtime. It always transmutes under a backend persona, even if the same bullet mentions React.
+- Express, NestJS, Fastify, Socket.io are BACKEND frameworks/libraries. Always transmute.
+- React, Vue, Angular, Svelte are FRONTEND frameworks. Keep these in the original sentence if the candidate genuinely did frontend; don't claim React experience for someone who didn't have it.
+
+Do NOT conflate "the bullet mentions React" with "this is a frontend bullet."
+
+For bullets you DO transmute:
+- Preserve verbs (architected, built, designed, processed).
+- Preserve metrics (10K+, 99.8%, across 4 microservices), scale figures, and business context (quoting platform, financial workflows).
+- Replace the LANGUAGE in the bullet with the persona's primary language.
+- Replace any FRAMEWORK with the persona's framework of the matching layer (backend bullets get persona's backend framework; frontend bullets get persona's frontend framework).
+- Replace any DATABASE with the persona's database (only if persona has one defined).
+- Pull in 1–2 secondary tech terms from the persona naturally — don't keyword-stuff.
+
+FRAMEWORK INFERENCE WHEN PERSONA LACKS ONE (CRITICAL):
+If the persona lists a primary language but no backend (or frontend) framework, INFER the most popular framework for that language and use it as if the persona named it. Do NOT skip the bullet just because the persona's framework field is empty.
+
+Inferred defaults to use:
+- Go / Golang → Gin
+- Python → FastAPI
+- TypeScript / JavaScript → Express (backend) / React (frontend)
+- Java → Spring Boot
+- C# → ASP.NET
+- Ruby → Rails
+- Rust → Actix
+- Kotlin → Ktor
+- PHP → Laravel
+
+Never drop a bullet for "no framework in persona" — infer one.
+
+LANGUAGE-BOUND TOOLING SWAP (CRITICAL — failure mode):
+A bullet may contain TESTING TOOLS, DEPENDENCY-INJECTION CONTAINERS, IDIOMS, or LIBRARIES that are specific to a language DIFFERENT from the persona's. Even if these aren't in the JD, they MUST be swapped to the persona-language equivalents — otherwise the resume reads as "Golang BOM engine using Java interfaces and Spring IoC", which is incoherent.
+
+Common swaps when the persona's primary language is GO and the bullet contains:
+- JUnit / JUnit 5 → Go's "testing" package + Testify
+- Mockito → GoMock or Testify mock
+- Spring Boot Test → Go integration tests with httptest
+- Spring IoC / Spring DI → Go DI via Wire or constructor injection
+- Spring Events → Go channels (or NATS / Kafka if event-bus)
+- Spring Web Flux → Go goroutines + channels (or drop "reactive" if no clean parallel)
+- Java interfaces / abstract classes → Go interfaces (Go has interfaces natively; just call them "Go interfaces")
+- Maven / Gradle → Go modules
+
+When the persona is PYTHON and the bullet contains:
+- JUnit, Mockito, Spring → pytest, unittest.mock, FastAPI/Django patterns
+- Java enums / interfaces → Python protocols or abstract base classes
+
+When the persona is TYPESCRIPT/JAVASCRIPT and the bullet contains:
+- JUnit / pytest → Jest or Vitest
+- Spring / Django → Express middleware patterns
+
+Apply the swap aggressively. If you see any framework / tooling word that doesn't belong to the persona's language, replace it. If unsure of a direct equivalent, drop the language-bound clause rather than leave it.
+
+END-OF-SENTENCE STRAGGLER SWEEP (CRITICAL):
+A common failure mode is transmuting the START of a sentence correctly but leaving a wrong-language word in a TRAILING clause. Examples that have shipped broken:
+- "Enhanced CI/CD pipelines using Jenkins ... ensuring consistent delivery of Spring Boot microservices." → trailing "Spring Boot" must be "Golang" / persona's language.
+- "Migrated inter-service communication to gRPC ... Node.js gateway consumed gRPC ..." → trailing "Node.js gateway" must be "Golang gateway" / persona's language.
+
+Before responding, READ EACH REWRITE FROM END TO START. If any tech word names a language or framework that is NOT the persona's, replace it with the persona's equivalent or rewrite the clause to drop it. No language/framework name from a non-persona ecosystem should survive anywhere in any rewrite.
+
+OUTPUT JSON: { "replacements": { "<index>": "<rewritten>" } }
+Include only bullets you actually transmuted. Skip-decisions (activity doesn't match persona) are silent — omit from output.
+
+WORD COUNT: stay within ±${WORD_COUNT_TOLERANCE} words of original.
+COHERENCE: every transmuted bullet must describe a system that could actually exist. No frontend frameworks in REST API bullets, no Spring Batch in Python services, no AWS Lambda powering an LLM.
+No commentary.`
+
+/** Find the paragraph indices that contain comma-separated skill lists under
+ *  the SKILLS section heading. These are the targets for must-have padding. */
+function findSkillsParagraphs(paragraphs: DocxParagraph[]): number[] {
+  const out: number[] = []
+  let inSkills = false
+  for (const p of paragraphs) {
+    const trimmed = p.text.trim()
+    if (!trimmed) continue
+    if (/^(skills|technical skills|technologies)$/i.test(trimmed)) {
+      inSkills = true
+      continue
+    }
+    if (
+      /^(work experience|experience|education|projects|certifications|awards|achievements|contact|summary|profile)$/i.test(
+        trimmed,
+      )
+    ) {
+      inSkills = false
+      continue
+    }
+    if (inSkills && !p.isBullet) {
+      const commas = (trimmed.match(/,/g) || []).length
+      // Only paragraphs with ≥2 commas — that's a content line, not a subheading.
+      if (commas >= 2) out.push(p.index)
+    }
+  }
+  return out
+}
+
+/** Decide which existing skills paragraph a missing must-have should be
+ *  appended to, based on what kind of skills the paragraph already contains. */
+function classifySkillsParagraph(text: string): 'lang' | 'infra' {
+  const lower = text.toLowerCase()
+  const infraSignals = [
+    'aws', 'gcp', 'azure', 'docker', 'kubernetes', 'jenkins', 'grafana',
+    'kafka', 'redis', 'rabbitmq', 'opentelemetry', 'nginx', 'ci/cd', 'cloud',
+    'terraform', 'github actions', 'datadog',
+  ]
+  const langSignals = [
+    'java', 'python', 'javascript', 'typescript', 'react', 'spring', 'mysql',
+    'postgresql', 'mongodb', 'graphql', 'rest', 'flask', 'django', 'fastapi',
+    'go', 'golang',
+  ]
+  let infra = 0
+  let lang = 0
+  for (const s of infraSignals) if (lower.includes(s)) infra++
+  for (const s of langSignals) if (lower.includes(s)) lang++
+  return infra > lang ? 'infra' : 'lang'
+}
+
+const SKILLS_CATEGORY_TARGET: Record<string, 'lang' | 'infra'> = {
+  language: 'lang',
+  backend: 'lang',
+  frontend: 'lang',
+  database: 'lang',
+  api: 'lang',
+  methodology: 'lang',
+  concept: 'lang',
+  ai: 'lang',
+  cache: 'infra',
+  queue: 'infra',
+  cloud: 'infra',
+  orchestration: 'infra',
+  iac: 'infra',
+  observability: 'infra',
+  cicd: 'infra',
+}
+
+/** Append a comma-separated list of new terms to an existing skills line,
+ *  preserving any trailing punctuation. */
+function appendToSkillsLine(originalText: string, newTerms: string[]): string {
+  if (newTerms.length === 0) return originalText
+  let text = originalText.trimEnd()
+  let trailingPeriod = ''
+  if (text.endsWith('.')) {
+    trailingPeriod = '.'
+    text = text.slice(0, -1)
+  }
+  text = text.replace(/,\s*$/, '')
+  return `${text}, ${newTerms.join(', ')}${trailingPeriod}`
+}
+
 export async function rewriteResume(args: {
   paragraphs: DocxParagraph[]
   jobDescription: string
+  /** When true, the model extracts a persona from the JD (+ optional title)
+   *  and transmutes every bullet's tech stack to fit it. If extraction comes
+   *  back low-confidence, we fall back to keyword-swap automatically. */
+  personaMode?: boolean
+  /** Optional role title to help persona extraction (e.g. pasted from the
+   *  job posting). Only used if personaMode is true. */
+  roleTitle?: string
 }): Promise<RewriteResult> {
   if (!client) {
     throw new Error(
@@ -798,6 +1019,55 @@ export async function rewriteResume(args: {
   // and final-resume Boolean check below.
   const mustHaves = await extractMustHaves(args.jobDescription)
 
+  // If persona mode was requested, extract the persona BEFORE the rewrite
+  // loop. If the extraction comes back low-confidence, fall back to
+  // keyword-swap and surface the reason in the result.
+  let persona: Persona | undefined
+  let personaFallbackReason: string | undefined
+  let mode: 'persona-transmute' | 'keyword-swap' = 'keyword-swap'
+  if (args.personaMode) {
+    const candidate = await extractPersona({
+      jobDescription: args.jobDescription,
+      roleTitle: args.roleTitle,
+    })
+    // Only fall back when there's no primary language at all. The confidence
+    // field is informational only — the model is too conservative about
+    // returning "high" (it routinely says "low" for clear JDs like
+    // "Mandatory Skills: Golang"). A primary language is enough signal.
+    if (!candidate.primaryLanguage) {
+      personaFallbackReason =
+        candidate.reasoning ||
+        'The JD did not name a specific primary language. Falling back to keyword-swap mode.'
+    } else {
+      persona = candidate
+      mode = 'persona-transmute'
+    }
+  }
+
+  // Build the persona block injected into every rewrite call (only used
+  // when mode === 'persona-transmute').
+  let personaSystemPrompt: string | undefined
+  let personaBlock: string | undefined
+  if (mode === 'persona-transmute' && persona) {
+    personaSystemPrompt = PERSONA_SYSTEM_PROMPT_BASE
+    personaBlock = [
+      `=== ACTIVE PERSONA (transmute all bullets to this stack) ===`,
+      `Role type: ${persona.roleType}`,
+      `Primary language: ${persona.primaryLanguage}`,
+      persona.backendFramework ? `Backend framework: ${persona.backendFramework}` : '',
+      persona.frontendFramework ? `Frontend framework: ${persona.frontendFramework}` : '',
+      persona.database ? `Database: ${persona.database}` : '',
+      persona.cloud ? `Cloud: ${persona.cloud}` : '',
+      persona.secondaryTech.length > 0
+        ? `Secondary tech (use 1–2 per bullet, max): ${persona.secondaryTech.join(', ')}`
+        : '',
+      ``,
+      `Reasoning: ${persona.reasoning}`,
+    ]
+      .filter(Boolean)
+      .join('\n')
+  }
+
   let pending: PendingBullet[] = bullets.map((b) => ({
     index: b.index,
     originalText: b.text,
@@ -808,9 +1078,6 @@ export async function rewriteResume(args: {
   const addedByIndex: Record<number, string[]> = {}
   let attempts = 0
 
-  // Helper: given current accepted rewrites + untouched bullets, which
-  // must-haves does the resume-as-a-whole still lack? Used to bias each
-  // retry round toward filling resume-wide gaps instead of duplicating.
   const computeResumeGaps = (): MustHave[] => {
     const finalText = bullets
       .map((b) => accepted[b.index] ?? b.text)
@@ -827,6 +1094,8 @@ export async function rewriteResume(args: {
       fullResumeText,
       mustHaves,
       resumeGaps,
+      personaSystemPrompt,
+      personaBlock,
     )
 
     const nextPending: PendingBullet[] = []
@@ -867,7 +1136,22 @@ export async function rewriteResume(args: {
 
       const wordCountOk =
         Math.abs(got - b.targetWords) <= WORD_COUNT_TOLERANCE
-      const coverageOk = addedMustHaves.length >= 1
+
+      // In persona mode, accept a rewrite even if it didn't add a JD must-have
+      // — as long as it transmuted the bullet's tech stack to the persona
+      // (specifically: it now contains the persona's primary language and
+      // the original didn't). Otherwise high-value swaps like "Spring Boot →
+      // Gin" get dropped on coverage because Gin isn't a must-have.
+      const personaLangAdded =
+        mode === 'persona-transmute' &&
+        persona !== undefined &&
+        persona.primaryLanguage.length > 0 &&
+        candidate.toLowerCase().includes(persona.primaryLanguage.toLowerCase()) &&
+        !b.originalText
+          .toLowerCase()
+          .includes(persona.primaryLanguage.toLowerCase())
+
+      const coverageOk = addedMustHaves.length >= 1 || personaLangAdded
 
       if (wordCountOk && coverageOk) {
         accepted[b.index] = candidate
@@ -937,6 +1221,23 @@ export async function rewriteResume(args: {
       newWords: b.lastAttempt?.words ?? 0,
     }))
 
+  // In persona transmute mode, the candidate's CORE STACK (language,
+  // backend/frontend framework, database, cloud) should be allowed to appear
+  // in every bullet — a Go engineer's resume says "Golang" everywhere by
+  // design. Secondary tech still gets the cap (we don't want Docker in 9
+  // bullets). Build the exempt set lowercased for case-insensitive matching.
+  const exemptLowerTerms = new Set<string>()
+  if (mode === 'persona-transmute' && persona) {
+    if (persona.primaryLanguage)
+      exemptLowerTerms.add(persona.primaryLanguage.toLowerCase())
+    if (persona.backendFramework)
+      exemptLowerTerms.add(persona.backendFramework.toLowerCase())
+    if (persona.frontendFramework)
+      exemptLowerTerms.add(persona.frontendFramework.toLowerCase())
+    if (persona.database) exemptLowerTerms.add(persona.database.toLowerCase())
+    if (persona.cloud) exemptLowerTerms.add(persona.cloud.toLowerCase())
+  }
+
   // Enforce repetition cap: revert any rewrite that would push a must-have
   // past MAX_BULLETS_PER_KEYWORD occurrences in the final resume.
   const bulletShape = bullets.map((b) => ({
@@ -949,6 +1250,7 @@ export async function rewriteResume(args: {
       accepted,
       mustHaves,
       MAX_BULLETS_PER_KEYWORD,
+      exemptLowerTerms,
     )
 
   // Resurrection pass: a bumped rewrite carried away every keyword it added,
@@ -1017,6 +1319,7 @@ export async function rewriteResume(args: {
     rawGapFills,
     mustHaves,
     MAX_BULLETS_PER_KEYWORD,
+    exemptLowerTerms,
   )
 
   // Mid-point Boolean check after rewrites + gap-fill bullets.
@@ -1053,9 +1356,88 @@ export async function rewriteResume(args: {
     }
   }
 
-  // Final Boolean check including fabricated replacements + gap-fill bullets.
+  // Skills padding: append any must-haves still missing AFTER fabrication to
+  // the appropriate skills paragraph. Uses categorization to split between
+  // the "Languages/Frameworks/Databases" paragraph and the "Cloud/Infra"
+  // paragraph. The result is silent on the actual flow (no LLM call), so
+  // it's free and always runs.
+  const beforeSkillsText = (() => {
+    // Full-resume check: include every paragraph (work bullets + skills +
+    // education + headers). Previously we only scanned work bullets — which
+    // meant terms already in your Skills line counted as "missing".
+    return args.paragraphs
+      .map((p) => finalAccepted[p.index] ?? p.text)
+      .join('\n') +
+      '\n' +
+      generatedBullets.map((g) => g.text).join('\n')
+  })()
+  const stillMissingAfterFabrication = checkBooleanQuery(
+    beforeSkillsText,
+    mustHaves,
+  ).missing
+
+  const skillsPaddingApplied: Record<number, string[]> = {}
+  if (stillMissingAfterFabrication.length > 0) {
+    const skillsIndices = findSkillsParagraphs(args.paragraphs)
+    if (skillsIndices.length > 0) {
+      // Categorize each skills paragraph by what it currently holds.
+      const skillsCategory = new Map<number, 'lang' | 'infra'>()
+      for (const idx of skillsIndices) {
+        const p = args.paragraphs.find((x) => x.index === idx)
+        if (p) skillsCategory.set(idx, classifySkillsParagraph(p.text))
+      }
+      // Find one paragraph for each category — fall back to either if only
+      // one type of skills paragraph exists.
+      let langIdx: number | undefined
+      let infraIdx: number | undefined
+      for (const [idx, cat] of skillsCategory.entries()) {
+        if (cat === 'lang' && langIdx === undefined) langIdx = idx
+        if (cat === 'infra' && infraIdx === undefined) infraIdx = idx
+      }
+      if (langIdx === undefined && infraIdx !== undefined) langIdx = infraIdx
+      if (infraIdx === undefined && langIdx !== undefined) infraIdx = langIdx
+
+      const langTerms: string[] = []
+      const infraTerms: string[] = []
+      for (const m of stillMissingAfterFabrication) {
+        const target = SKILLS_CATEGORY_TARGET[m.category] ?? 'lang'
+        if (target === 'lang') langTerms.push(m.term)
+        else infraTerms.push(m.term)
+      }
+
+      if (langIdx !== undefined && langTerms.length > 0) {
+        const p = args.paragraphs.find((x) => x.index === langIdx)
+        if (p) {
+          finalAccepted[langIdx] = appendToSkillsLine(p.text, langTerms)
+          skillsPaddingApplied[langIdx] = langTerms
+        }
+      }
+      if (infraIdx !== undefined && infraTerms.length > 0 && infraIdx !== langIdx) {
+        const p = args.paragraphs.find((x) => x.index === infraIdx)
+        if (p) {
+          finalAccepted[infraIdx] = appendToSkillsLine(p.text, infraTerms)
+          skillsPaddingApplied[infraIdx] = infraTerms
+        }
+      } else if (infraIdx === langIdx && infraTerms.length > 0 && langIdx !== undefined) {
+        // Both categories share the same paragraph — combine into the
+        // existing append we already did.
+        const p = args.paragraphs.find((x) => x.index === langIdx)
+        if (p) {
+          const combined = [...langTerms, ...infraTerms]
+          finalAccepted[langIdx] = appendToSkillsLine(p.text, combined)
+          skillsPaddingApplied[langIdx] = combined
+        }
+      }
+    }
+  }
+
+  // Final Boolean check covers the WHOLE resume, including skills paragraphs.
+  // The previous bug — checking only work bullets — meant the Skills line was
+  // invisible to coverage.
   const finalText =
-    bullets.map((b) => finalAccepted[b.index] ?? b.text).join('\n') +
+    args.paragraphs
+      .map((p) => finalAccepted[p.index] ?? p.text)
+      .join('\n') +
     '\n' +
     generatedBullets.map((g) => g.text).join('\n')
   const booleanMatch = checkBooleanQuery(finalText, mustHaves)
@@ -1076,5 +1458,13 @@ export async function rewriteResume(args: {
     alignmentRelaxed,
     resurrectedForCoverage,
     fabricatedReplacements,
+    mode,
+    persona,
+    personaFallbackReason,
+    skillsPaddingApplied,
   }
 }
+
+// Re-export so the UI can render persona summaries without importing
+// directly from persona.ts.
+export { describePersona }

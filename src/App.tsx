@@ -1,7 +1,11 @@
 import { useState } from 'react'
 import type { DragEvent, ChangeEvent } from 'react'
 import { readDocx, type DocxDoc } from './lib/extract-docx'
-import { rewriteResume, type RewriteResult } from './lib/rewrite-resume'
+import {
+  rewriteResume,
+  describePersona,
+  type RewriteResult,
+} from './lib/rewrite-resume'
 import { buildModifiedDocx } from './lib/modify-docx'
 import './App.css'
 
@@ -12,6 +16,8 @@ function App() {
   const [file, setFile] = useState<File | null>(null)
   const [doc, setDoc] = useState<DocxDoc | null>(null)
   const [jobDescription, setJobDescription] = useState('')
+  const [personaMode, setPersonaMode] = useState(false)
+  const [roleTitle, setRoleTitle] = useState('')
   const [result, setResult] = useState<RewriteResult | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [isReading, setIsReading] = useState(false)
@@ -67,6 +73,8 @@ function App() {
       const res = await rewriteResume({
         paragraphs: doc.paragraphs,
         jobDescription,
+        personaMode,
+        roleTitle: roleTitle.trim() || undefined,
       })
       setResult(res)
     } catch (err) {
@@ -142,6 +150,32 @@ function App() {
             rows={8}
           />
         </label>
+
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={personaMode}
+            onChange={(e) => setPersonaMode(e.target.checked)}
+          />
+          <span>
+            Aggressive persona rewrite — extract a target persona from the
+            JD and transmute every bullet's tech stack to fit it. Falls back
+            to keyword-swap automatically if the JD is too generic.
+          </span>
+        </label>
+
+        {personaMode && (
+          <label className="field">
+            <span>Role title (optional — helps persona extraction)</span>
+            <input
+              type="text"
+              value={roleTitle}
+              onChange={(e) => setRoleTitle(e.target.value)}
+              placeholder="e.g. Senior Go Fullstack Engineer"
+            />
+          </label>
+        )}
+
         <button
           type="button"
           className="primary"
@@ -154,6 +188,30 @@ function App() {
 
       {result && (
         <section className="panel">
+          <div
+            className={`mode-badge ${
+              result.mode === 'persona-transmute'
+                ? 'mode-badge--persona'
+                : 'mode-badge--swap'
+            }`}
+          >
+            <strong>
+              Mode:{' '}
+              {result.mode === 'persona-transmute'
+                ? 'Persona transmute'
+                : 'Keyword swap'}
+            </strong>
+            {result.mode === 'persona-transmute' && result.persona && (
+              <span> — {describePersona(result.persona)}</span>
+            )}
+            {result.personaFallbackReason && (
+              <span className="mode-badge__fallback">
+                {' '}
+                — Requested persona mode, fell back: {result.personaFallbackReason}
+              </span>
+            )}
+          </div>
+
           <h2 className="section-title">
             Rewrote {replacementCount} paragraph
             {replacementCount === 1 ? '' : 's'}
@@ -192,6 +250,19 @@ function App() {
               resurrected to fill must-haves that would otherwise be missing.
               A keyword may appear in 3 bullets instead of 2 as a result — the
               trade-off for higher Boolean coverage.
+            </p>
+          )}
+
+          {Object.values(result.skillsPaddingApplied).flat().length > 0 && (
+            <p className="hint">
+              Added to your Skills section:{' '}
+              <strong>
+                {Object.values(result.skillsPaddingApplied)
+                  .flat()
+                  .join(', ')}
+              </strong>{' '}
+              — must-haves that didn't fit in any work bullet got appended to
+              the skills lines so ATS Boolean coverage holds.
             </p>
           )}
 

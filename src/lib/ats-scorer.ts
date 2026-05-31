@@ -48,17 +48,17 @@ export async function extractMustHaves(jd: string): Promise<MustHave[]> {
     throw new Error('VITE_OPENAI_API_KEY is not set.')
   }
 
-  const SYSTEM = `You are a technical recruiter. From a job description, identify the MUST-HAVE terms you would put in a Boolean AND-query to filter ATS results.
+  const SYSTEM = `You are a technical recruiter. From a job description, identify all the CONCRETE terms a recruiter would put in a Boolean OR-query against an ATS — both required tech AND niche bonus terms.
 
 What qualifies as a must-have:
-- Explicit hard requirements (in "Requirements" / "Technical Skills" / "Key Responsibilities").
+- Hard requirements (in "Requirements" / "Technical Skills" / "Key Responsibilities").
 - Specific, named technologies / frameworks / databases / cloud services / methodologies.
-- Recruiters can realistically AND together 6–12 of these. Pick the ones THIS JD treats as non-negotiable.
+- Specific named concepts, standards, or protocols (e.g. "C2PA", "W3C Verifiable Credentials", "ODRL", "KYC", "zero-knowledge proofs").
+- TERMS FROM "NICE TO HAVE" / "GOOD TO HAVE" / "BONUS" / "PREFERRED" / "DESIRABLE" SECTIONS COUNT. Recruiters absolutely DO Boolean-search niche bonus terms — the smaller the company / more specialised the role, the more those bonuses matter. For a startup whose differentiator is C2PA + verifiable credentials, those words are GOLD for ATS matching. Pull them in as weight-2 must-haves.
 
 What does NOT qualify:
 - Soft skills (communication, teamwork, leadership) — recruiters don't Boolean-search these.
 - Generic verbs (build, develop, collaborate, design).
-- Aspirational nice-to-haves buried in the prose.
 - Years-of-experience phrases.
 
 For each must-have, also list realistic ALIASES — the surface forms a candidate might write on their resume. E.g.:
@@ -67,11 +67,18 @@ For each must-have, also list realistic ALIASES — the surface forms a candidat
 - "PostgreSQL" → aliases: ["PostgreSQL", "Postgres", "PG"]
 - "REST APIs" → aliases: ["REST APIs", "RESTful APIs", "REST API"]
 - "CI/CD" → aliases: ["CI/CD", "CI / CD", "CICD", "continuous integration"]
+- "Verifiable Credentials" → aliases: ["Verifiable Credentials", "VC", "W3C VC", "W3C Verifiable Credentials"]
+- "Zero-Knowledge Proofs" → aliases: ["Zero-Knowledge Proofs", "ZKP", "zk-SNARK", "zero knowledge"]
 
 Include the canonical term itself in aliases. Don't include misspellings.
 
-Output: JSON { "mustHaves": [ { "term": "...", "aliases": [...], "category": "language|backend|frontend|database|cache|queue|cloud|orchestration|iac|observability|cicd|api|ai|methodology|concept" } ] }
-6–12 entries. No commentary.`
+Weighting:
+- weight 3: hard requirements stated as non-negotiable.
+- weight 2: nice-to-haves, bonus terms, preferred experience — still valuable for ATS Boolean searches.
+- weight 1: contextual / passing mentions.
+
+Output: JSON { "mustHaves": [ { "term": "...", "aliases": [...], "weight": 3, "category": "language|backend|frontend|database|cache|queue|cloud|orchestration|iac|observability|cicd|api|ai|methodology|concept" } ] }
+8–18 entries. No commentary.`
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o',
